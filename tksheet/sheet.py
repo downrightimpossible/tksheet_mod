@@ -963,15 +963,67 @@ class Sheet(tk.Frame):
             raise ValueError("Span must have a name.")
         if span.type_ not in named_span_types:
             raise ValueError(f"Span 'type_' must be one of the following: {', '.join(named_span_types)}.")
+
+        # Capture existing options if not already specified in kwargs
+        # This ensures that pre-existing formatting is preserved in the named span
+        rows, cols = self.ranges_from_span(span)
+
+        # Capture alignment if present and not already in kwargs
+        if span.type_ != "align" and "align" not in span.kwargs and rows and cols and span.table:
+            # Check first cell for alignment
+            first_align = self.MT.get_cell_kwargs(rows[0], cols[0], key="align")
+            if first_align:
+                # Convert internal alignment values to user-friendly names
+                align_map = {"n": "center", "nw": "left", "ne": "right"}
+                span.kwargs["align"] = align_map.get(first_align, first_align)
+
+        # Capture highlight if present and not already in kwargs
+        if span.type_ != "highlight" and rows and cols and span.table:
+            first_highlight = self.MT.get_cell_kwargs(rows[0], cols[0], key="highlight")
+            if first_highlight and ("bg" not in span.kwargs and "fg" not in span.kwargs):
+                if hasattr(first_highlight, "bg") and first_highlight.bg:
+                    span.kwargs["bg"] = first_highlight.bg
+                if hasattr(first_highlight, "fg") and first_highlight.fg:
+                    span.kwargs["fg"] = first_highlight.fg
+
+        # Capture readonly if present and not already in kwargs
+        if span.type_ != "readonly" and "readonly" not in span.kwargs and rows and cols and span.table:
+            first_readonly = self.MT.get_cell_kwargs(rows[0], cols[0], key="readonly")
+            if first_readonly:
+                span.kwargs["readonly"] = first_readonly
+
         self.MT.named_spans[span.name] = span
         self.create_options_from_span(span)
         return span
 
     def create_options_from_span(self, span: Span, set_data: bool = True) -> Sheet:
+        # Apply primary type with its options
         if span.type_ == "format":
             self.format(span, set_data=set_data, **span.kwargs)
         else:
             getattr(self, span.type_)(span, **span.kwargs)
+
+        # Apply additional options that are not the primary type
+        # This allows named spans to have multiple option types applied
+        # (e.g., a highlight span can also have alignment)
+
+        # Apply alignment if present and not the primary type
+        if span.type_ != "align" and "align" in span.kwargs:
+            self.align(span, align=span.kwargs["align"], redraw=False)
+
+        # Apply highlight if present and not the primary type
+        if span.type_ != "highlight" and ("bg" in span.kwargs or "fg" in span.kwargs):
+            self.highlight(
+                span,
+                bg=span.kwargs.get("bg", False),
+                fg=span.kwargs.get("fg", False),
+                redraw=False,
+            )
+
+        # Apply readonly if present and not the primary type
+        if span.type_ != "readonly" and "readonly" in span.kwargs:
+            self.readonly(span, readonly=span.kwargs["readonly"])
+
         return self
 
     def del_named_span(self, name: str) -> Sheet:
@@ -2325,6 +2377,18 @@ class Sheet(tk.Frame):
                     add_highlight(self.CH.cell_options, c, bg, fg, end, overwrite)
                 if table:
                     add_highlight(self.MT.col_options, c, bg, fg, end, overwrite)
+        # If this is a named span, persist the highlight in kwargs for reapplication
+        if span.name and span.name in self.MT.named_spans:
+            if bg is not False:
+                if bg is None:
+                    span.kwargs.pop("bg", None)
+                else:
+                    span.kwargs["bg"] = bg
+            if fg is not False:
+                if fg is None:
+                    span.kwargs.pop("fg", None)
+                else:
+                    span.kwargs["fg"] = fg
         self.set_refresh_timer(redraw)
         return span
 
@@ -2335,6 +2399,10 @@ class Sheet(tk.Frame):
     ) -> Span:
         span = self.span_from_key(*key)
         self.del_options_using_span(span, "highlight")
+        # If this is a named span, remove highlight from kwargs
+        if span.name and span.name in self.MT.named_spans:
+            span.kwargs.pop("bg", None)
+            span.kwargs.pop("fg", None)
         self.set_refresh_timer(redraw)
         return span
 
@@ -2732,6 +2800,9 @@ class Sheet(tk.Frame):
                     set_readonly(self.CH.cell_options, c, readonly)
                 if table:
                     set_readonly(self.MT.col_options, c, readonly)
+        # If this is a named span, persist the readonly state in kwargs for reapplication
+        if span.name and span.name in self.MT.named_spans:
+            span.kwargs["readonly"] = readonly
         return span
 
     # Text Font and Alignment
@@ -2802,29 +2873,36 @@ class Sheet(tk.Frame):
         span = self.span_from_key(*key)
         rows, cols = self.ranges_from_span(span)
         table, index, header = span.table, span.index, span.header
-        align = convert_align(align)
+        converted_align = convert_align(align)
         if span.kind == "cell":
             if header:
                 for c in cols:
-                    set_align(self.CH.cell_options, c, align)
+                    set_align(self.CH.cell_options, c, converted_align)
             for r in rows:
                 if index:
-                    set_align(self.RI.cell_options, r, align)
+                    set_align(self.RI.cell_options, r, converted_align)
                 if table:
                     for c in cols:
-                        set_align(self.MT.cell_options, (r, c), align)
+                        set_align(self.MT.cell_options, (r, c), converted_align)
         elif span.kind == "row":
             for r in rows:
                 if index:
-                    set_align(self.RI.cell_options, r, align)
+                    set_align(self.RI.cell_options, r, converted_align)
                 if table:
-                    set_align(self.MT.row_options, r, align)
+                    set_align(self.MT.row_options, r, converted_align)
         elif span.kind == "column":
             for c in cols:
                 if header:
-                    set_align(self.CH.cell_options, c, align)
+                    set_align(self.CH.cell_options, c, converted_align)
                 if table:
-                    set_align(self.MT.col_options, c, align)
+                    set_align(self.MT.col_options, c, converted_align)
+        # If this is a named span, persist the alignment in kwargs for reapplication
+        if span.name and span.name in self.MT.named_spans:
+            if align is None:
+                # Remove alignment from kwargs if setting to None/global
+                span.kwargs.pop("align", None)
+            else:
+                span.kwargs["align"] = align
         self.set_refresh_timer(redraw)
         return span
 
@@ -2835,6 +2913,9 @@ class Sheet(tk.Frame):
     ) -> Span:
         span = self.span_from_key(*key)
         self.del_options_using_span(span, "align")
+        # If this is a named span, remove alignment from kwargs
+        if span.name and span.name in self.MT.named_spans:
+            span.kwargs.pop("align", None)
         self.set_refresh_timer(redraw)
         return span
 
